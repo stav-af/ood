@@ -1,0 +1,9 @@
+.env
+__pycache__
+data/*
+data_ood/*
+imagenet/*
+models/*
+results/*
+**.pth
+**.txt

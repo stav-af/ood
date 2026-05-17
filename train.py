@@ -1,0 +1,84 @@
+import math, time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import timm
+from tqdm import tqdm
+
+from config import Config
+cfg = Config()
+
+
+def evaluate(model, test_loader, criterion=nn.CrossEntropyLoss(label_smoothing=0.01), device='cuda'):
+    model.eval()
+    correct, total, loss_sum = 0, 0, 0.0
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=(device == "cuda")):
+        for x, y in test_loader:
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            logits = model(x)
+            loss = criterion(logits, y)
+            loss_sum += loss.item() * y.size(0)
+            pred = logits.argmax(dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    return loss_sum / total, correct / total
+
+
+
+def train(model, train_df, test_df, epochs=cfg.epochs):
+    device = "cuda" if torch.cuda.is_available() else Exception("No GPU detected")
+    torch.backends.cudnn.benchmark = True
+
+    train_loader = DataLoader(
+        train_df, batch_size=cfg.batch_size, shuffle=True,
+        num_workers=cfg.num_workers, pin_memory=True, persistent_workers=cfg.num_workers > 0
+    )
+    test_loader = DataLoader(
+        test_df, batch_size=cfg.batch_size, shuffle=False,
+        num_workers=cfg.num_workers, pin_memory=True, persistent_workers=cfg.num_workers > 0
+    )
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
+
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        pbar = tqdm(train_loader, desc=f"epoch {epoch}/{epochs}", dynamic_ncols=True)
+        running_loss = 0.0
+        n = 0
+
+        for x, y in pbar:
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=(device == "cuda")):
+                logits = model(x)
+                loss = criterion(logits, y)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item() * y.size(0)
+            n += y.size(0)
+            pbar.set_postfix(loss=running_loss / n, lr=optimizer.param_groups[0]["lr"])
+
+            # skip for tests
+            # break
+
+        scheduler.step()
+        val_loss, val_acc = evaluate(model, test_loader)
+        print(f"  val_loss={val_loss:.4f}  val_acc={val_acc*100:.2f}%")
+    
+    # torch.save(model.state_dict(), "base_cifar100_224x224.pth")
+
+
+
