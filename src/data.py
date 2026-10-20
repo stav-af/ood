@@ -1,11 +1,12 @@
 import torch
 
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from torchvision import datasets, transforms
 from collections import defaultdict
 
 from tqdm import tqdm
-from config import Config
+
+from src.config import Config
 cfg = Config()
 
 IN_CIFAR_CLASSES = [
@@ -94,10 +95,10 @@ def _get_transforms(mean, std):
 
 def _get_mean_std(ds):
     # for testing
-    # return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 
     print("calculating stats")
-    assert torch.cuda.is_available(), "No cuda!"
+    # assert torch.cuda.is_available(), "No cuda!"
     channel_sum = torch.zeros(3)
     channel_sq_sum = torch.zeros(3)
     n_pixels = 0
@@ -117,17 +118,16 @@ def _get_mean_std(ds):
 
 
 def get_ood(
-    imagenet_root="./imagenet",
+    imagenet_root="./data/imagenet",
     excluded_idxs=IN_CIFAR_CLASSES,
-    batch_size=256
 ):
+    print("Getting ImageNet")
     stats_tf = transforms.Compose([
         transforms.Resize(224),
         transforms.CenterCrop(224),
         transforms.ToTensor()
     ])
 
-    print("loading imagenet")
     stats_train_base = datasets.ImageNet(root=imagenet_root, split="train", transform=stats_tf)
 
     print("filtering imagenet")
@@ -136,7 +136,9 @@ def get_ood(
         **dataloader_kwargs
     )
 
-    mean, std = _get_mean_std(stats_train_ds)
+    # mean, std = _get_mean_std(stats_train_ds)
+    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    
     train_tf, test_tf = _get_transforms(mean, std)
     
     train_base = datasets.ImageNet(root=imagenet_root, split="train", transform=train_tf)
@@ -149,7 +151,8 @@ def get_ood(
 
 
 
-def get_base(data_root="./data", batch_size=256):
+def get_base(data_root="./data/cifar"):
+    print("Loading CIFAR")
     stats_tf = transforms.Compose([transforms.ToTensor()])
     stats_train_ds = datasets.CIFAR100(
         root=data_root, train=True, download=True, transform=stats_tf
@@ -179,3 +182,41 @@ def get_base(data_root="./data", batch_size=256):
 
     return train_ds, test_ds
 
+
+def mix_datasets(a, b, p=0.2, total_size=None, seed=0):
+    assert 0.0 <= p <= 1.0
+
+    if total_size is None:
+        if p == 0:
+            total_size = len(a)
+        elif p == 1:
+            total_size = len(b)
+        else:
+            total_size = min(int(len(a) / (1 - p)), int(len(b) / p))
+
+    n_b = int(round(total_size * p))
+    n_a = total_size - n_b
+
+    if n_a > len(a) or n_b > len(b):
+        raise ValueError(
+            f"Requested n_a={n_a}, n_b={n_b}, but len(a)={len(a)}, len(b)={len(b)}"
+        )
+
+    g = torch.Generator().manual_seed(seed)
+    idx_a = torch.randperm(len(a), generator=g)[:n_a].tolist()
+    idx_b = torch.randperm(len(b), generator=g)[:n_b].tolist()
+
+    return ConcatDataset([
+        Subset(a, idx_a),
+        Subset(b, idx_b),
+    ])
+
+
+def get_mixed_dataset():
+    base_train, base_test = get_base()
+    ood_train, ood_test = get_ood()
+
+    mix_train = mix_datasets(base_train, ood_train)
+    mix_test = mix_datasets(base_test, ood_test)
+
+    return mix_train, mix_test

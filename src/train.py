@@ -1,13 +1,16 @@
-import math, time
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+
 import timm
 from tqdm import tqdm
 
-from config import Config
+from src.data import get_base, get_mixed_dataset
+from src.utils.naming import model_location, pretrained_model_location
+from src.utils.load import load_model
+
+from src.config import Config
 cfg = Config()
 
 
@@ -27,8 +30,10 @@ def evaluate(model, test_loader, criterion=nn.CrossEntropyLoss(label_smoothing=0
 
 
 
-def train(model, train_df, test_df, epochs=cfg.epochs):
-    device = "cuda" if torch.cuda.is_available() else Exception("No GPU detected")
+def _train(model, train_df, test_df, epochs=cfg.epochs, save_every=1):
+    print("Launching training")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.backends.cudnn.benchmark = True
 
     train_loader = DataLoader(
@@ -77,8 +82,38 @@ def train(model, train_df, test_df, epochs=cfg.epochs):
         scheduler.step()
         val_loss, val_acc = evaluate(model, test_loader)
         print(f"  val_loss={val_loss:.4f}  val_acc={val_acc*100:.2f}%")
+
+        if save_every is not None and epoch % save_every == 0:
+            torch.save(model.state_dict(), model_location(epoch))
+
+
+def _launch_train(train, test, model=None, epochs=cfg.epochs, save_every=cfg.save_every):
+    print("Begin mixed training task")
+    device = "cuda" if torch.cuda.is_available() else 'cpu'
+
+    if model is None:
+        print(f"Loading {cfg.model} architecture")
+        model = timm.create_model(cfg.model, pretrained=False, num_classes=cfg.num_classes)
+        
+        print(f"Sending model to {device}")
+        model.to(device)
     
-    # torch.save(model.state_dict(), "base_cifar100_224x224.pth")
+    _train(model, train, test, cfg.epochs, save_every=save_every)
+    return model
 
 
+def pretrain():
+    base_train, base_test = get_base()
+    
+    model = _launch_train(base_train, base_test, save_every=None)
+    torch.save(model.state_dict(), pretrained_model_location())
+
+    return model
+
+
+def train():
+    mix_train, mix_test = get_mixed_dataset()
+
+    model = _launch_train(mix_train, mix_test, model=load_model())
+    return model
 
